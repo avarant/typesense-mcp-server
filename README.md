@@ -4,6 +4,16 @@ A [Model Context Protocol](https://github.com/modelcontextprotocol/python-sdk) (
 
 ## Installation
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+On Mac you can install it using [homebrew](https://brew.sh/)
+
+```shell
+brew install uv
+```
+
+Clone the package
+
 ```shell
 git clone git@github.com:avarant/typesense-mcp-server.git ~/typesense-mcp-server
 ```
