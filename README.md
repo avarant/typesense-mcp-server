@@ -23,7 +23,7 @@ Update your `.cursor/mcp.json` to use in **Cursor**
 ```json
 {
   "mcpServers": {
-    "server-name": {
+    "typesense": {
       "command": "uv",
       "args": ["--directory", "~/typesense-mcp-server", "run", "mcp", "run", "main.py"],
       "env": {
