@@ -1,9 +1,19 @@
 # Typesense MCP Server
+[![smithery badge](https://smithery.ai/badge/@avarant/typesense-mcp-server)](https://smithery.ai/server/@avarant/typesense-mcp-server)
 
 A [Model Context Protocol](https://github.com/modelcontextprotocol/python-sdk) (MCP) Server that interfaces with [Typesense](https://typesense.org/)
 
 ## Installation
 
+### Installing via Smithery
+
+To install Typesense Server Integration for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@avarant/typesense-mcp-server):
+
+```bash
+npx -y @smithery/cli install @avarant/typesense-mcp-server --client claude
+```
+
+### Manual Installation
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 On Mac you can install it using [homebrew](https://brew.sh/)
