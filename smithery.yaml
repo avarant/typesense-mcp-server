@@ -1,0 +1,43 @@
+# Smithery configuration file: https://smithery.ai/docs/build/project-config
+
+startCommand:
+  type: stdio
+  configSchema:
+    # JSON Schema defining the configuration options for the MCP.
+    type: object
+    required:
+      - typesenseApiKey
+    properties:
+      typesenseHost:
+        type: string
+        default: localhost
+        description: Typesense server host
+      typesensePort:
+        type: number
+        default: 8108
+        description: Typesense server port
+      typesenseProtocol:
+        type: string
+        default: http
+        description: Typesense protocol (http or https)
+      typesenseApiKey:
+        type: string
+        description: Typesense API key
+  commandFunction:
+    # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
+    |-
+    (config) => ({
+      command: "mcp",
+      args: ["run", "main.py"],
+      env: {
+        TYPESENSE_HOST: config.typesenseHost,
+        TYPESENSE_PORT: config.typesensePort.toString(),
+        TYPESENSE_PROTOCOL: config.typesenseProtocol,
+        TYPESENSE_API_KEY: config.typesenseApiKey
+      }
+    })
+  exampleConfig:
+    typesenseHost: localhost
+    typesensePort: 8108
+    typesenseProtocol: http
+    typesenseApiKey: xyzABC123
