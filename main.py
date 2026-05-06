@@ -25,10 +25,17 @@ class Settings(BaseSettings):
     typesense_protocol: str = Field(default='http', alias='TYPESENSE_PROTOCOL')
     typesense_api_key: str = Field(..., alias='TYPESENSE_API_KEY') # Required, use ...
 
-    # MCP transport settings (used when running as an HTTP/SSE listener)
-    mcp_transport: str = Field(default='stdio', alias='MCP_TRANSPORT')  # 'stdio' or 'sse'
+    # MCP transport settings (used when running as an HTTP listener)
+    # Supported transports: 'stdio', 'sse', 'streamable-http'
+    mcp_transport: str = Field(default='stdio', alias='MCP_TRANSPORT')
     mcp_host: str = Field(default='0.0.0.0', alias='MCP_HOST')
     mcp_port: int = Field(default=8000, alias='MCP_PORT')
+    # Stateless mode: required for browser clients like llama.cpp web chat that
+    # don't maintain a session across requests. Only meaningful for HTTP transports.
+    mcp_stateless_http: bool = Field(default=False, alias='MCP_STATELESS_HTTP')
+    # CORS allowed origins, comma-separated (e.g. "http://localhost:3000,https://app.example").
+    # Use "*" to allow any origin. Empty (default) disables CORS.
+    mcp_cors_origins: str = Field(default='', alias='MCP_CORS_ORIGINS')
 
     class Config:
         # Allows loading from a .env file if present
@@ -91,14 +98,19 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         print("Shutting down. Typesense client resources managed automatically.")
 
 
-# Pre-load settings so we can pass HTTP host/port into FastMCP for SSE mode.
+# Pre-load settings so we can pass HTTP host/port into FastMCP for HTTP modes.
 # Settings() reads env vars; a missing TYPESENSE_API_KEY would raise here, which is
 # fine for `mcp.run(...)` but not for tooling like `mcp dev` that imports this
 # module without the env set — so fall back to defaults if instantiation fails.
 try:
     _settings = Settings()
-    _server_kwargs = {"host": _settings.mcp_host, "port": _settings.mcp_port}
+    _server_kwargs = {
+        "host": _settings.mcp_host,
+        "port": _settings.mcp_port,
+        "stateless_http": _settings.mcp_stateless_http,
+    }
 except Exception:
+    _settings = None
     _server_kwargs = {}
 
 # Initialize the MCP Server with the lifespan manager
@@ -817,13 +829,51 @@ async def import_documents_from_csv(
     return summary
 
 
+def _parse_cors_origins(raw: str) -> list[str]:
+    return [o.strip() for o in raw.split(',') if o.strip()]
+
+
+def _run_http_with_cors(app, host: str, port: int, origins: list[str]) -> None:
+    """Wrap a FastMCP HTTP app in CORS middleware and serve it with uvicorn."""
+    import uvicorn
+    from starlette.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    uvicorn.run(app, host=host, port=port)
+
+
 if __name__ == "__main__":
     # Transport selection:
-    #   MCP_TRANSPORT=stdio (default)  -> stdin/stdout, for desktop clients
-    #   MCP_TRANSPORT=sse              -> HTTP SSE listener on MCP_HOST:MCP_PORT
-    # CLI flag `--sse` overrides the env var for convenience.
+    #   MCP_TRANSPORT=stdio (default)    -> stdin/stdout, for desktop clients
+    #   MCP_TRANSPORT=sse                -> HTTP SSE listener on MCP_HOST:MCP_PORT
+    #   MCP_TRANSPORT=streamable-http    -> Streamable HTTP at /mcp (recommended for web clients)
+    # CLI flags --sse and --http override the env var for convenience.
     import sys
-    transport = "sse" if "--sse" in sys.argv else _settings.mcp_transport if _server_kwargs else "stdio"
-    if transport not in ("stdio", "sse"):
-        raise SystemExit(f"Unsupported MCP_TRANSPORT={transport!r}; expected 'stdio' or 'sse'.")
-    mcp.run(transport=transport)
+    if _settings is None:
+        raise SystemExit("Failed to load settings (is TYPESENSE_API_KEY set?).")
+
+    if "--sse" in sys.argv:
+        transport = "sse"
+    elif "--http" in sys.argv:
+        transport = "streamable-http"
+    else:
+        transport = _settings.mcp_transport
+
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    elif transport in ("sse", "streamable-http"):
+        origins = _parse_cors_origins(_settings.mcp_cors_origins)
+        if origins:
+            app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
+            _run_http_with_cors(app, _settings.mcp_host, _settings.mcp_port, origins)
+        else:
+            mcp.run(transport=transport)
+    else:
+        raise SystemExit(
+            f"Unsupported MCP_TRANSPORT={transport!r}; expected 'stdio', 'sse', or 'streamable-http'."
+        )

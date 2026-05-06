@@ -49,7 +49,7 @@ Update your `.cursor/mcp.json` to use in **Cursor**
 
 ## Transports
 
-The server supports two MCP transports. STDIO is the default and is what most desktop clients (Claude Desktop, Cursor, etc.) use. For remote clients, web UIs, or stateless tools like `llama.cpp` chat, you can run it as an HTTP **SSE** listener instead.
+The server supports three MCP transports. STDIO is the default and is what most desktop clients (Claude Desktop, Cursor, etc.) use. For remote clients or web UIs, you can run it as an HTTP server using either the legacy SSE transport or the newer **Streamable HTTP** transport.
 
 ### STDIO (default)
 
@@ -57,28 +57,38 @@ The server supports two MCP transports. STDIO is the default and is what most de
 TYPESENSE_API_KEY=xyz uv run python main.py
 ```
 
-### HTTP / SSE
+### Streamable HTTP (recommended for web clients)
 
-Set `MCP_TRANSPORT=sse` (or pass `--sse`) and optionally override host/port:
+Single endpoint at `/mcp`. Works with browser-based clients like the `llama.cpp` web chat. Set `MCP_TRANSPORT=streamable-http` (or pass `--http`):
 
 ```shell
 TYPESENSE_API_KEY=xyz \
-MCP_TRANSPORT=sse \
-MCP_HOST=0.0.0.0 \
-MCP_PORT=8000 \
+MCP_TRANSPORT=streamable-http \
+MCP_STATELESS_HTTP=true \
+MCP_CORS_ORIGINS='*' \
 uv run python main.py
 ```
 
-The server then exposes:
+- Stateless mode (`MCP_STATELESS_HTTP=true`) is required for clients that don't keep an MCP session across requests.
+- CORS must be enabled (`MCP_CORS_ORIGINS`) for browser clients. Use a specific origin like `http://localhost:8080` in production rather than `*`.
 
-- `GET  http://<host>:<port>/sse`        — SSE event stream (clients connect here)
-- `POST http://<host>:<port>/messages/`  — JSON-RPC message endpoint
+### SSE (legacy)
 
-| Env var          | Default     | Description                                  |
-|------------------|-------------|----------------------------------------------|
-| `MCP_TRANSPORT`  | `stdio`     | `stdio` or `sse`                             |
-| `MCP_HOST`       | `0.0.0.0`   | Bind address for SSE mode                    |
-| `MCP_PORT`       | `8000`      | Bind port for SSE mode                       |
+Two endpoints, `GET /sse` for the event stream and `POST /messages/` for JSON-RPC. Set `MCP_TRANSPORT=sse` (or pass `--sse`):
+
+```shell
+TYPESENSE_API_KEY=xyz MCP_TRANSPORT=sse uv run python main.py
+```
+
+### Configuration
+
+| Env var               | Default     | Description                                                          |
+|-----------------------|-------------|----------------------------------------------------------------------|
+| `MCP_TRANSPORT`       | `stdio`     | `stdio`, `sse`, or `streamable-http`                                 |
+| `MCP_HOST`            | `0.0.0.0`   | Bind address for HTTP transports                                     |
+| `MCP_PORT`            | `8000`      | Bind port for HTTP transports                                        |
+| `MCP_STATELESS_HTTP`  | `false`     | Stateless mode for HTTP transports (required for some web clients)   |
+| `MCP_CORS_ORIGINS`    | _(empty)_   | Comma-separated allowed origins. Empty disables CORS. `*` = any.     |
 
 ## Available Tools
 
