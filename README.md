@@ -18,7 +18,7 @@ Clone the package
 git clone git@github.com:avarant/typesense-mcp-server.git ~/typesense-mcp-server
 ```
 
-Update your `.cursor/mcp.json` to use in **Cursor**
+Add the server to your MCP client config. Most clients (Cursor at `~/.cursor/mcp.json`, Claude Desktop at `~/Library/Application Support/Claude/claude_desktop_config.json`, Windsurf, Zed, VS Code, etc.) accept the same `mcpServers` shape:
 
 ```json
 {
@@ -28,7 +28,7 @@ Update your `.cursor/mcp.json` to use in **Cursor**
       "args": ["--directory", "~/typesense-mcp-server", "run", "mcp", "run", "main.py"],
       "env": {
         "TYPESENSE_HOST": "",
-        "TYPESENSE_PORT": "", 
+        "TYPESENSE_PORT": "",
         "TYPESENSE_PROTOCOL": "",
         "TYPESENSE_API_KEY": ""
       }
@@ -36,6 +36,8 @@ Update your `.cursor/mcp.json` to use in **Cursor**
   }
 }
 ```
+
+Refer to your client's MCP documentation for the exact config file location.
 
 ## Transports
 
