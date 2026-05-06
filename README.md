@@ -47,6 +47,39 @@ Update your `.cursor/mcp.json` to use in **Cursor**
 }
 ```
 
+## Transports
+
+The server supports two MCP transports. STDIO is the default and is what most desktop clients (Claude Desktop, Cursor, etc.) use. For remote clients, web UIs, or stateless tools like `llama.cpp` chat, you can run it as an HTTP **SSE** listener instead.
+
+### STDIO (default)
+
+```shell
+TYPESENSE_API_KEY=xyz uv run python main.py
+```
+
+### HTTP / SSE
+
+Set `MCP_TRANSPORT=sse` (or pass `--sse`) and optionally override host/port:
+
+```shell
+TYPESENSE_API_KEY=xyz \
+MCP_TRANSPORT=sse \
+MCP_HOST=0.0.0.0 \
+MCP_PORT=8000 \
+uv run python main.py
+```
+
+The server then exposes:
+
+- `GET  http://<host>:<port>/sse`        — SSE event stream (clients connect here)
+- `POST http://<host>:<port>/messages/`  — JSON-RPC message endpoint
+
+| Env var          | Default     | Description                                  |
+|------------------|-------------|----------------------------------------------|
+| `MCP_TRANSPORT`  | `stdio`     | `stdio` or `sse`                             |
+| `MCP_HOST`       | `0.0.0.0`   | Bind address for SSE mode                    |
+| `MCP_PORT`       | `8000`      | Bind port for SSE mode                       |
+
 ## Available Tools
 
 The Typesense MCP Server provides the following tools:

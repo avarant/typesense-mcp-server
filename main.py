@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     typesense_protocol: str = Field(default='http', alias='TYPESENSE_PROTOCOL')
     typesense_api_key: str = Field(..., alias='TYPESENSE_API_KEY') # Required, use ...
 
+    # MCP transport settings (used when running as an HTTP/SSE listener)
+    mcp_transport: str = Field(default='stdio', alias='MCP_TRANSPORT')  # 'stdio' or 'sse'
+    mcp_host: str = Field(default='0.0.0.0', alias='MCP_HOST')
+    mcp_port: int = Field(default=8000, alias='MCP_PORT')
+
     class Config:
         # Allows loading from a .env file if present
         env_file = '.env'
@@ -86,8 +91,18 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         print("Shutting down. Typesense client resources managed automatically.")
 
 
+# Pre-load settings so we can pass HTTP host/port into FastMCP for SSE mode.
+# Settings() reads env vars; a missing TYPESENSE_API_KEY would raise here, which is
+# fine for `mcp.run(...)` but not for tooling like `mcp dev` that imports this
+# module without the env set — so fall back to defaults if instantiation fails.
+try:
+    _settings = Settings()
+    _server_kwargs = {"host": _settings.mcp_host, "port": _settings.mcp_port}
+except Exception:
+    _server_kwargs = {}
+
 # Initialize the MCP Server with the lifespan manager
-mcp = FastMCP("Typesense MCP Server", lifespan=app_lifespan)
+mcp = FastMCP("Typesense MCP Server", lifespan=app_lifespan, **_server_kwargs)
 
 
 # Example tool demonstrating access to the Typesense client
@@ -891,3 +906,15 @@ async def import_documents_from_csv(
     }
     print(f"CSV Import Summary: {summary}")
     return summary
+
+
+if __name__ == "__main__":
+    # Transport selection:
+    #   MCP_TRANSPORT=stdio (default)  -> stdin/stdout, for desktop clients
+    #   MCP_TRANSPORT=sse              -> HTTP SSE listener on MCP_HOST:MCP_PORT
+    # CLI flag `--sse` overrides the env var for convenience.
+    import sys
+    transport = "sse" if "--sse" in sys.argv else _settings.mcp_transport if _server_kwargs else "stdio"
+    if transport not in ("stdio", "sse"):
+        raise SystemExit(f"Unsupported MCP_TRANSPORT={transport!r}; expected 'stdio' or 'sse'.")
+    mcp.run(transport=transport)
