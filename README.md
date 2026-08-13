@@ -1,3 +1,5 @@
+
+
 # Typesense MCP Server
 
 A [Model Context Protocol](https://github.com/modelcontextprotocol/python-sdk) (MCP) Server that interfaces with [Typesense](https://typesense.org/)
@@ -5,6 +7,8 @@ A [Model Context Protocol](https://github.com/modelcontextprotocol/python-sdk) (
 ## Installation
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
+
+*Requires Python 3.11 or higher.*
 
 On Mac you can install it using [homebrew](https://brew.sh/)
 
