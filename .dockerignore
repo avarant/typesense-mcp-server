@@ -1,0 +1,8 @@
+# Keep secrets, local environments and VCS data out of the build context.
+.env
+.env.*
+.venv
+.git
+.claude
+__pycache__
+*.py[oc]
