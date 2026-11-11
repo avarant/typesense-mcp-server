@@ -68,6 +68,25 @@ uv run python main.py
 - Stateless mode (`MCP_STATELESS_HTTP=true`) is required for clients that don't keep an MCP session across requests.
 - CORS must be enabled (`MCP_CORS_ORIGINS`) for browser clients. Use a specific origin like `http://localhost:8080` in production rather than `*`.
 
+### HTTP security
+
+The HTTP transports give full access to your Typesense instance using the configured API key, so they are locked down by default:
+
+- **Loopback only.** The server listens on `127.0.0.1` unless you set `MCP_HOST`.
+- **Host/Origin checks.** Requests must address the server as `localhost`, `127.0.0.1` or `[::1]` (plus anything in `MCP_ALLOWED_HOSTS`), and browser requests must come from a localhost page or an origin listed in `MCP_CORS_ORIGINS`. This blocks DNS-rebinding attacks from websites you visit. With `MCP_CORS_ORIGINS='*'`, only localhost pages are allowed.
+- **Token required for remote access.** To accept connections from other machines, set `MCP_HOST=0.0.0.0`, `MCP_AUTH_TOKEN`, and `MCP_ALLOWED_HOSTS` to the hostname/IP clients use. Clients must then send `Authorization: Bearer <token>`. The server refuses to start on a non-loopback address without a token unless `MCP_ALLOW_UNAUTHENTICATED=true` (only for setups that enforce auth elsewhere, e.g. a reverse proxy).
+
+```shell
+TYPESENSE_API_KEY=xyz \
+MCP_TRANSPORT=streamable-http \
+MCP_HOST=0.0.0.0 \
+MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
+MCP_ALLOWED_HOSTS=mcp.example.com \
+uv run python main.py
+```
+
+When running the HTTP transport in Docker, set `MCP_HOST=0.0.0.0` inside the container (plus a token), since connections from the host aren't loopback from the container's point of view.
+
 ### SSE (legacy)
 
 Two endpoints, `GET /sse` for the event stream and `POST /messages/` for JSON-RPC. Set `MCP_TRANSPORT=sse` (or pass `--sse`):
@@ -81,8 +100,11 @@ TYPESENSE_API_KEY=xyz MCP_TRANSPORT=sse uv run python main.py
 | Env var               | Default     | Description                                                          |
 |-----------------------|-------------|----------------------------------------------------------------------|
 | `MCP_TRANSPORT`       | `stdio`     | `stdio`, `sse`, or `streamable-http`                                 |
-| `MCP_HOST`            | `0.0.0.0`   | Bind address for HTTP transports                                     |
+| `MCP_HOST`            | `127.0.0.1` | Bind address for HTTP transports                                     |
 | `MCP_PORT`            | `8000`      | Bind port for HTTP transports                                        |
+| `MCP_AUTH_TOKEN`      | _(empty)_   | Bearer token required on HTTP requests. Required when `MCP_HOST` is not loopback. |
+| `MCP_ALLOWED_HOSTS`   | _(empty)_   | Extra accepted `Host` values, comma-separated (localhost is always allowed). No port = any port. |
+| `MCP_ALLOW_UNAUTHENTICATED` | `false` | Allow a non-loopback `MCP_HOST` without `MCP_AUTH_TOKEN` (auth enforced elsewhere). |
 | `MCP_STATELESS_HTTP`  | `false`     | Stateless mode for HTTP transports (required for some web clients)   |
 | `MCP_CORS_ORIGINS`    | _(empty)_   | Comma-separated allowed origins. Empty disables CORS. `*` = any.     |
 | `CSV_IMPORT_DIR`      | _(empty)_   | Directory `import_documents_from_csv` may read files from. Empty disables file-path imports (inline CSV only). |

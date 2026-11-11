@@ -6,6 +6,8 @@ import os  # Import os for environment variables (though BaseSettings handles it
 import json # Added for parsing JSON Lines in export
 import csv  # Added for CSV import
 import io   # Added for CSV import from string
+import hmac
+import ipaddress
 
 # Import Typesense and Pydantic Settings
 import typesense
@@ -16,6 +18,7 @@ from pydantic import Field  # Import Field for default values/validation if need
 # from fake_database import Database  # Replace with your actual DB type
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Configuration settings loaded from environment variables
 class Settings(BaseSettings):
@@ -28,8 +31,19 @@ class Settings(BaseSettings):
     # MCP transport settings (used when running as an HTTP listener)
     # Supported transports: 'stdio', 'sse', 'streamable-http'
     mcp_transport: str = Field(default='stdio', alias='MCP_TRANSPORT')
-    mcp_host: str = Field(default='0.0.0.0', alias='MCP_HOST')
+    # Loopback by default. Set to 0.0.0.0 (or a specific interface) to accept
+    # connections from other machines; that also requires MCP_AUTH_TOKEN.
+    mcp_host: str = Field(default='127.0.0.1', alias='MCP_HOST')
     mcp_port: int = Field(default=8000, alias='MCP_PORT')
+    # Bearer token required on every HTTP request when set. Mandatory when MCP_HOST
+    # is not a loopback address (unless MCP_ALLOW_UNAUTHENTICATED=true).
+    mcp_auth_token: str = Field(default='', alias='MCP_AUTH_TOKEN')
+    # Escape hatch for deployments that enforce auth elsewhere (e.g. a reverse proxy).
+    mcp_allow_unauthenticated: bool = Field(default=False, alias='MCP_ALLOW_UNAUTHENTICATED')
+    # Extra Host header values accepted by the HTTP transports, comma-separated
+    # (e.g. "mcp.example.com,100.64.0.5:8000"). Localhost is always allowed. A value
+    # without a port matches any port.
+    mcp_allowed_hosts: str = Field(default='', alias='MCP_ALLOWED_HOSTS')
     # Stateless mode: required for browser clients like llama.cpp web chat that
     # don't maintain a session across requests. Only meaningful for HTTP transports.
     mcp_stateless_http: bool = Field(default=False, alias='MCP_STATELESS_HTTP')
@@ -107,12 +121,60 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 # Settings() reads env vars; a missing TYPESENSE_API_KEY would raise here, which is
 # fine for `mcp.run(...)` but not for tooling like `mcp dev` that imports this
 # module without the env set — so fall back to defaults if instantiation fails.
+def _split_csv(raw: str) -> list[str]:
+    return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+def _is_loopback(host: str) -> bool:
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host.strip('[]')).is_loopback
+    except ValueError:
+        return False
+
+
+def _build_transport_security(settings: Settings) -> TransportSecuritySettings:
+    """
+    Always enable Host/Origin validation (DNS rebinding protection), regardless of
+    the bind address. Localhost is always allowed; MCP_ALLOWED_HOSTS adds more hosts
+    and MCP_CORS_ORIGINS adds more browser origins.
+    """
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    allowed_origins = [
+        f"{scheme}://{host}:*"
+        for scheme in ("http", "https")
+        for host in ("127.0.0.1", "localhost", "[::1]")
+    ]
+    # Browsers omit the port from Origin when it is the scheme default.
+    allowed_origins += [
+        f"{scheme}://{host}"
+        for scheme in ("http", "https")
+        for host in ("127.0.0.1", "localhost", "[::1]")
+    ]
+    for host in _split_csv(settings.mcp_allowed_hosts):
+        has_port = host.rsplit(':', 1)[-1].isdigit() and not host.endswith(']')
+        if has_port:
+            allowed_hosts.append(host)
+        else:
+            allowed_hosts += [host, f"{host}:*"]
+        allowed_origins += [f"{scheme}://{h}" for scheme in ("http", "https")
+                            for h in ([host] if has_port else [host, f"{host}:*"])]
+    allowed_origins += [o for o in _split_csv(settings.mcp_cors_origins) if o != '*']
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 try:
     _settings = Settings()
     _server_kwargs = {
         "host": _settings.mcp_host,
         "port": _settings.mcp_port,
         "stateless_http": _settings.mcp_stateless_http,
+        "transport_security": _build_transport_security(_settings),
     }
 except Exception:
     _settings = None
@@ -858,22 +920,60 @@ async def import_documents_from_csv(
     return summary
 
 
-def _parse_cors_origins(raw: str) -> list[str]:
-    return [o.strip() for o in raw.split(',') if o.strip()]
+class BearerTokenMiddleware:
+    """ASGI middleware that rejects HTTP requests lacking `Authorization: Bearer <token>`."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            provided = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(provided, self.expected):
+                from starlette.responses import PlainTextResponse
+                response = PlainTextResponse(
+                    "Unauthorized", status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
-def _run_http_with_cors(app, host: str, port: int, origins: list[str]) -> None:
-    """Wrap a FastMCP HTTP app in CORS middleware and serve it with uvicorn."""
+def _run_http(transport: str, settings: Settings) -> None:
+    """Serve a FastMCP HTTP app with optional bearer auth and CORS."""
     import uvicorn
     from starlette.middleware.cors import CORSMiddleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    uvicorn.run(app, host=host, port=port)
+
+    if not _is_loopback(settings.mcp_host) and not settings.mcp_auth_token \
+            and not settings.mcp_allow_unauthenticated:
+        raise SystemExit(
+            f"Refusing to listen on non-loopback address {settings.mcp_host!r} without "
+            "authentication. Set MCP_AUTH_TOKEN, or MCP_ALLOW_UNAUTHENTICATED=true if "
+            "auth is enforced elsewhere (e.g. a reverse proxy)."
+        )
+
+    app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
+
+    # Middleware added last runs first: CORS must wrap auth so preflight
+    # (OPTIONS) requests, which never carry credentials, are answered.
+    if settings.mcp_auth_token:
+        app.add_middleware(BearerTokenMiddleware, token=settings.mcp_auth_token)
+
+    origins = _split_csv(settings.mcp_cors_origins)
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            # No cookies are used; bearer tokens travel in a header.
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
+        )
+
+    uvicorn.run(app, host=settings.mcp_host, port=settings.mcp_port)
 
 
 if __name__ == "__main__":
@@ -896,12 +996,7 @@ if __name__ == "__main__":
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport in ("sse", "streamable-http"):
-        origins = _parse_cors_origins(_settings.mcp_cors_origins)
-        if origins:
-            app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
-            _run_http_with_cors(app, _settings.mcp_host, _settings.mcp_port, origins)
-        else:
-            mcp.run(transport=transport)
+        _run_http(transport, _settings)
     else:
         raise SystemExit(
             f"Unsupported MCP_TRANSPORT={transport!r}; expected 'stdio', 'sse', or 'streamable-http'."
