@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Use "*" to allow any origin. Empty (default) disables CORS.
     mcp_cors_origins: str = Field(default='', alias='MCP_CORS_ORIGINS')
 
+    # Directory that import_documents_from_csv may read CSV files from.
+    # Empty (default) disables file-path imports entirely; only inline CSV data is accepted.
+    # Paths are resolved (symlinks included) and must stay inside this directory.
+    csv_import_dir: str = Field(default='', alias='CSV_IMPORT_DIR')
+
     class Config:
         # Allows loading from a .env file if present
         env_file = '.env'
@@ -670,6 +675,25 @@ async def delete_document(ctx: Context, collection_name: str, document_id: str) 
         print(f"An unexpected error occurred while deleting document '{document_id}' from '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
+def _resolve_csv_import_path(candidate: str, import_dir: str) -> str | None:
+    """
+    Return the canonical path of `candidate` if it is an existing regular file inside
+    `import_dir`, otherwise None (the input is then treated as inline CSV data).
+
+    Relative paths are resolved against `import_dir`. Symlinks and `..` segments are
+    resolved before the containment check, so they cannot escape the directory.
+    """
+    if not import_dir or '\n' in candidate or '\x00' in candidate:
+        return None
+    try:
+        root = os.path.realpath(import_dir)
+        target = os.path.realpath(os.path.join(root, candidate))
+        if os.path.commonpath([root, target]) != root or not os.path.isfile(target):
+            return None
+    except (OSError, ValueError):
+        return None
+    return target
+
 # Tool to import documents from CSV data or file path
 @mcp.tool()
 async def import_documents_from_csv(
@@ -688,6 +712,8 @@ async def import_documents_from_csv(
         ctx (Context): The MCP context.
         collection_name (str): The name of the collection.
         csv_data_or_path (str): Either the raw CSV data as a string or the path to a CSV file.
+            File paths are only read when the server sets CSV_IMPORT_DIR, and must point
+            inside that directory (relative paths are resolved against it).
         batch_size (int): Number of documents to import per batch. Defaults to 100.
         action (str): Import action ('create', 'upsert', 'update'). Defaults to 'upsert'.
 
@@ -716,12 +742,15 @@ async def import_documents_from_csv(
         file_obj = None
         reader = None
 
-        # Determine if input is path or data
-        if os.path.exists(csv_data_or_path):
-            print(f"Importing from file path: {csv_data_or_path}")
+        # Determine if input is path or data. File paths are only honoured when
+        # CSV_IMPORT_DIR is configured and the resolved path stays inside it.
+        settings: Settings = ctx.request_context.lifespan_context.settings
+        safe_path = _resolve_csv_import_path(csv_data_or_path, settings.csv_import_dir)
+        if safe_path is not None:
+            print(f"Importing from file path: {safe_path}")
             try:
                 # Specify encoding, adjust if needed
-                file_obj = open(csv_data_or_path, 'r', newline='', encoding='utf-8')
+                file_obj = open(safe_path, 'r', newline='', encoding='utf-8')
                 reader = csv.DictReader(file_obj)
             except FileNotFoundError:
                  return {"success": False, "error": f"CSV file not found at path: {csv_data_or_path}"}

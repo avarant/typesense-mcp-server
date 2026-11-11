@@ -85,6 +85,7 @@ TYPESENSE_API_KEY=xyz MCP_TRANSPORT=sse uv run python main.py
 | `MCP_PORT`            | `8000`      | Bind port for HTTP transports                                        |
 | `MCP_STATELESS_HTTP`  | `false`     | Stateless mode for HTTP transports (required for some web clients)   |
 | `MCP_CORS_ORIGINS`    | _(empty)_   | Comma-separated allowed origins. Empty disables CORS. `*` = any.     |
+| `CSV_IMPORT_DIR`      | _(empty)_   | Directory `import_documents_from_csv` may read files from. Empty disables file-path imports (inline CSV only). |
 
 ## Available Tools
 
@@ -106,7 +107,7 @@ The Typesense MCP Server provides the following tools:
 - `upsert_document` - Upserts (creates or updates) a single document in a specific collection
 - `index_multiple_documents` - Indexes (creates, upserts, or updates) multiple documents in a batch
 - `delete_document` - Deletes a single document by its ID from a specific collection
-- `import_documents_from_csv` - Imports documents from CSV data into a collection
+- `import_documents_from_csv` - Imports documents from inline CSV data, or from a CSV file inside `CSV_IMPORT_DIR`, into a collection
 
 ### Search Capabilities
 - `search` - Performs a keyword search on a specific collection
