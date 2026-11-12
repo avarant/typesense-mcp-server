@@ -8,6 +8,7 @@ import csv  # Added for CSV import
 import io   # Added for CSV import from string
 import hmac
 import ipaddress
+import logging
 
 # Import Typesense and Pydantic Settings
 import typesense
@@ -19,6 +20,11 @@ from pydantic import Field  # Import Field for default values/validation if need
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+
+# Log to stderr only. In stdio mode stdout carries the MCP JSON-RPC stream, so
+# anything written there (e.g. print()) corrupts the protocol and lets tool
+# arguments containing newlines inject forged messages.
+logger = logging.getLogger("typesense_mcp")
 
 # Configuration settings loaded from environment variables
 class Settings(BaseSettings):
@@ -114,7 +120,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     finally:
         # Cleanup on shutdown (if necessary)
         # Typesense client based on HTTPX usually doesn't need explicit closing
-        print("Shutting down. Typesense client resources managed automatically.")
+        logger.info("Shutting down. Typesense client resources managed automatically.")
 
 
 # Pre-load settings so we can pass HTTP host/port into FastMCP for HTTP modes.
@@ -199,11 +205,11 @@ async def check_typesense_health(ctx: Context) -> dict | str:
     # Access the Typesense client from the lifespan context
     try:
         client: typesense.Client = ctx.request_context.lifespan_context.client
-        health_status = await client.health.retrieve()
-        return health_status
+        # The Typesense client is synchronous and exposes health via operations.
+        return {"ok": client.operations.is_healthy()}
     except Exception as e:
         # Log the exception ideally
-        print(f"Error checking Typesense health: {e}")
+        logger.error(f"Error checking Typesense health: {e}")
         return f"Error connecting to Typesense or checking health: {e}"
 
 # --- Typesense Collection Tools ---
@@ -226,10 +232,10 @@ async def list_collections(ctx: Context) -> list | str:
         # The response is expected to be a list of dictionaries
         return collections
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error listing collections: {e}")
+        logger.error(f"Error listing collections: {e}")
         return f"Error listing collections: {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while listing collections: {e}")
+        logger.error(f"An unexpected error occurred while listing collections: {e}")
         return f"An unexpected error occurred: {e}"
 
 # Tool to describe a specific collection
@@ -254,10 +260,10 @@ async def describe_collection(ctx: Context, collection_name: str) -> dict | str:
     except typesense.exceptions.ObjectNotFound:
         return f"Error: Collection '{collection_name}' not found."
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error describing collection '{collection_name}': {e}")
+        logger.error(f"Error describing collection '{collection_name}': {e}")
         return f"Error describing collection '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while describing collection '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while describing collection '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # Tool to export all documents from a collection
@@ -289,17 +295,17 @@ async def export_collection(ctx: Context, collection_name: str) -> list[dict] | 
             try:
                 documents.append(json.loads(line))
             except json.JSONDecodeError:
-                print(f"Warning: Could not decode JSON line during export: {line}")
+                logger.warning(f"Could not decode JSON line during export: {line}")
                 # Decide whether to skip or raise an error
                 continue
         return documents
     except typesense.exceptions.ObjectNotFound:
         return f"Error: Collection '{collection_name}' not found."
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error exporting collection '{collection_name}': {e}")
+        logger.error(f"Error exporting collection '{collection_name}': {e}")
         return f"Error exporting collection '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while exporting collection '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while exporting collection '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # --- Typesense Search Tools ---
@@ -368,10 +374,10 @@ async def search(
     except typesense.exceptions.RequestMalformed as e:
          return f"Error: Malformed search request for collection '{collection_name}'. Check parameters (query_by fields existence, filter/sort syntax, etc.). Details: {e}"
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error searching collection '{collection_name}': {e}")
+        logger.error(f"Error searching collection '{collection_name}': {e}")
         return f"Error searching collection '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while searching collection '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while searching collection '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 
@@ -446,10 +452,10 @@ async def vector_search(
              error_message += f" Check if text search fields in 'query_by' ({query_by}) exist in the schema."
          return error_message
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error during vector search in collection '{collection_name}': {e}")
+        logger.error(f"Error during vector search in collection '{collection_name}': {e}")
         return f"Error during vector search in collection '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred during vector search in collection '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred during vector search in collection '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # --- Collection Management Tools ---
@@ -472,18 +478,17 @@ async def create_collection(ctx: Context, schema: dict) -> dict | str:
 
     try:
         client: typesense.Client = ctx.request_context.lifespan_context.client
-        # Assuming create is async based on library structure
-        created_collection = await client.collections.create(schema)
+        created_collection = client.collections.create(schema)
         return created_collection
     except typesense.exceptions.ObjectAlreadyExists:
         return f"Error: Collection '{schema.get('name')}' already exists."
     except typesense.exceptions.RequestMalformed as e:
          return f"Error: Malformed create collection request. Check schema format. Details: {e}"
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error creating collection '{schema.get('name')}': {e}")
+        logger.error(f"Error creating collection '{schema.get('name')}': {e}")
         return f"Error creating collection '{schema.get('name')}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while creating collection '{schema.get('name')}': {e}")
+        logger.error(f"An unexpected error occurred while creating collection '{schema.get('name')}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # Tool to delete a collection
@@ -510,11 +515,18 @@ async def delete_collection(ctx: Context, collection_name: str) -> dict | str:
     except typesense.exceptions.ObjectNotFound:
         return f"Error: Collection '{collection_name}' not found."
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error deleting collection '{collection_name}': {e}")
+        logger.error(f"Error deleting collection '{collection_name}': {e}")
         return f"Error deleting collection '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while deleting collection '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while deleting collection '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
+
+def _collection_exists(client: typesense.Client, collection_name: str) -> bool:
+    try:
+        client.collections[collection_name].retrieve()
+        return True
+    except typesense.exceptions.ObjectNotFound:
+        return False
 
 # Tool to truncate a collection (delete all documents, keep schema)
 @mcp.tool()
@@ -538,7 +550,7 @@ async def truncate_collection(ctx: Context, collection_name: str) -> str:
 
     try:
         # 1. Retrieve the current schema (assuming sync)
-        print(f"Truncating '{collection_name}': Retrieving schema...")
+        logger.info(f"Truncating '{collection_name}': Retrieving schema...")
         original_schema = client.collections[collection_name].retrieve()
         # We only need the fields, name, and potentially other top-level settings for re-creation
         # Remove read-only fields like 'created_at', 'num_documents' before re-creating
@@ -548,12 +560,12 @@ async def truncate_collection(ctx: Context, collection_name: str) -> str:
         }
 
         # 2. Delete the collection (assuming sync)
-        print(f"Truncating '{collection_name}': Deleting original collection...")
+        logger.info(f"Truncating '{collection_name}': Deleting original collection...")
         client.collections[collection_name].delete()
 
-        # 3. Recreate the collection with the original schema (assuming async)
-        print(f"Truncating '{collection_name}': Recreating collection with schema...")
-        await client.collections.create(schema_to_recreate)
+        # 3. Recreate the collection with the original schema
+        logger.info(f"Truncating '{collection_name}': Recreating collection with schema...")
+        client.collections.create(schema_to_recreate)
 
         return f"Successfully truncated collection '{collection_name}'."
 
@@ -561,14 +573,14 @@ async def truncate_collection(ctx: Context, collection_name: str) -> str:
         return f"Error during truncate: Collection '{collection_name}' not found (maybe already deleted?)."
     except typesense.exceptions.TypesenseClientError as e:
         error_message = f"Error during truncate operation on '{collection_name}': {e}"
-        print(error_message)
+        logger.error(error_message)
         # Attempt to restore if deletion succeeded but recreation failed?
         # For now, just report the error stage.
-        if original_schema and not client.collections[collection_name].exists(): # Check if deleted but not recreated
+        if original_schema and not _collection_exists(client, collection_name): # Deleted but not recreated
              error_message += " Original collection was deleted but recreation failed."
         return error_message
     except Exception as e:
-        print(f"An unexpected error occurred during truncate for '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred during truncate for '{collection_name}': {e}")
         return f"An unexpected error occurred during truncate: {e}"
 
 # --- Document Management Tools ---
@@ -594,7 +606,7 @@ async def create_document(ctx: Context, collection_name: str, document: dict) ->
     # Consider adding check for 'id' field if not using auto-id generation
 
     try:
-        print(f"Creating document in collection '{collection_name}' with ID: {document.get('id', 'N/A')}")
+        logger.info(f"Creating document in collection '{collection_name}' with ID: {document.get('id', 'N/A')}")
         client: typesense.Client = ctx.request_context.lifespan_context.client
         # NOTE: Assuming create is *sync* based on observed pattern
         created_doc = client.collections[collection_name].documents.create(document)
@@ -607,10 +619,10 @@ async def create_document(ctx: Context, collection_name: str, document: dict) ->
     except typesense.exceptions.RequestMalformed as e:
          return f"Error: Malformed create document request for collection '{collection_name}'. Check document structure against schema. Details: {e}"
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error creating document in '{collection_name}': {e}")
+        logger.error(f"Error creating document in '{collection_name}': {e}")
         return f"Error creating document in '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while creating document in '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while creating document in '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # Tool to upsert (create or update) a single document
@@ -642,10 +654,10 @@ async def upsert_document(ctx: Context, collection_name: str, document: dict) ->
     except typesense.exceptions.RequestMalformed as e:
          return f"Error: Malformed upsert document request for collection '{collection_name}'. Check document structure against schema. Details: {e}"
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error upserting document in '{collection_name}': {e}")
+        logger.error(f"Error upserting document in '{collection_name}': {e}")
         return f"Error upserting document in '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while upserting document in '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while upserting document in '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 # Tool to index (create, upsert, update) multiple documents
@@ -689,7 +701,7 @@ async def index_multiple_documents(
             try:
                 results.append(json.loads(line))
             except json.JSONDecodeError:
-                print(f"Warning: Could not decode JSON line from import response: {line}")
+                logger.warning(f"Could not decode JSON line from import response: {line}")
                 results.append({'success': False, 'error': 'Failed to decode response line', 'raw_line': line})
         return results
     except typesense.exceptions.ObjectNotFound:
@@ -697,10 +709,10 @@ async def index_multiple_documents(
     except typesense.exceptions.RequestMalformed as e:
          return f"Error: Malformed bulk import request for collection '{collection_name}'. Check document structures. Details: {e}"
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error during bulk import to '{collection_name}': {e}")
+        logger.error(f"Error during bulk import to '{collection_name}': {e}")
         return f"Error during bulk import to '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred during bulk import to '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred during bulk import to '{collection_name}': {e}")
         return f"An unexpected error occurred during bulk import: {e}"
 
 # Tool to delete a single document by ID
@@ -731,10 +743,10 @@ async def delete_document(ctx: Context, collection_name: str, document_id: str) 
         # Could be collection or document not found
         return f"Error: Collection '{collection_name}' or Document ID '{document_id}' not found."
     except typesense.exceptions.TypesenseClientError as e:
-        print(f"Error deleting document '{document_id}' from '{collection_name}': {e}")
+        logger.error(f"Error deleting document '{document_id}' from '{collection_name}': {e}")
         return f"Error deleting document '{document_id}' from '{collection_name}': {e}"
     except Exception as e:
-        print(f"An unexpected error occurred while deleting document '{document_id}' from '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred while deleting document '{document_id}' from '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
 def _resolve_csv_import_path(candidate: str, import_dir: str) -> str | None:
@@ -809,7 +821,7 @@ async def import_documents_from_csv(
         settings: Settings = ctx.request_context.lifespan_context.settings
         safe_path = _resolve_csv_import_path(csv_data_or_path, settings.csv_import_dir)
         if safe_path is not None:
-            print(f"Importing from file path: {safe_path}")
+            logger.info(f"Importing from file path: {safe_path}")
             try:
                 # Specify encoding, adjust if needed
                 file_obj = open(safe_path, 'r', newline='', encoding='utf-8')
@@ -819,14 +831,14 @@ async def import_documents_from_csv(
             except Exception as e:
                  return {"success": False, "error": f"Error opening or reading CSV file: {e}"}
         else:
-            print("Importing from CSV string data.")
+            logger.info("Importing from CSV string data.")
             file_obj = io.StringIO(csv_data_or_path)
             reader = csv.DictReader(file_obj)
 
         if not reader or not reader.fieldnames:
              return {"success": False, "error": "Could not read CSV headers or data."}
 
-        print(f"CSV Headers detected: {reader.fieldnames}")
+        logger.info(f"CSV Headers detected: {reader.fieldnames}")
 
         for row in reader:
             total_processed += 1
@@ -849,7 +861,7 @@ async def import_documents_from_csv(
             batch.append(processed_row)
 
             if len(batch) >= batch_size:
-                print(f"Importing batch of {len(batch)} documents...")
+                logger.info(f"Importing batch of {len(batch)} documents...")
                 try:
                     # NOTE: Assuming import_ is *sync* based on observed pattern
                     # Also, the response is JSONL strings
@@ -865,11 +877,11 @@ async def import_documents_from_csv(
                                 total_failed += 1
                                 errors.append(result.get('error', 'Unknown error in batch result'))
                         except json.JSONDecodeError:
-                            print(f"Warning: Could not decode JSON line from import response: {line}")
+                            logger.warning(f"Could not decode JSON line from import response: {line}")
                             total_failed += 1
                             errors.append(f"Failed to decode response line: {line}")
                 except Exception as batch_error:
-                    print(f"Error importing batch: {batch_error}")
+                    logger.error(f"Error importing batch: {batch_error}")
                     total_failed += len(batch) # Assume all in batch failed
                     errors.append(f"Failed to import batch: {batch_error}")
                 finally:
@@ -877,7 +889,7 @@ async def import_documents_from_csv(
 
         # Import any remaining documents in the last batch
         if batch:
-            print(f"Importing final batch of {len(batch)} documents...")
+            logger.info(f"Importing final batch of {len(batch)} documents...")
             try:
                 # NOTE: Assuming import_ is *sync* based on observed pattern
                 batch_results_lines = client.collections[collection_name].documents.import_(batch, {'action': action})
@@ -892,18 +904,18 @@ async def import_documents_from_csv(
                             total_failed += 1
                             errors.append(result.get('error', 'Unknown error in batch result'))
                      except json.JSONDecodeError:
-                        print(f"Warning: Could not decode JSON line from import response: {line}")
+                        logger.warning(f"Could not decode JSON line from import response: {line}")
                         total_failed += 1
                         errors.append(f"Failed to decode response line: {line}")
             except Exception as batch_error:
-                print(f"Error importing final batch: {batch_error}")
+                logger.error(f"Error importing final batch: {batch_error}")
                 total_failed += len(batch)
                 errors.append(f"Failed to import final batch: {batch_error}")
 
     except typesense.exceptions.ObjectNotFound:
         return {"success": False, "error": f"Collection '{collection_name}' not found."}
     except Exception as e:
-        print(f"An unexpected error occurred during CSV import preparation or loop for '{collection_name}': {e}")
+        logger.error(f"An unexpected error occurred during CSV import preparation or loop for '{collection_name}': {e}")
         return {"success": False, "error": f"An unexpected error occurred during CSV import: {e}"}
     finally:
         if file_obj and not isinstance(file_obj, io.StringIO):
@@ -916,7 +928,7 @@ async def import_documents_from_csv(
         "total_failed": total_failed,
         "errors": errors[:10] # Limit reported errors
     }
-    print(f"CSV Import Summary: {summary}")
+    logger.info(f"CSV Import Summary: {summary}")
     return summary
 
 
