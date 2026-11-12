@@ -12,13 +12,13 @@ import logging
 
 # Import Typesense and Pydantic Settings
 import typesense
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field  # Import Field for default values/validation if needed
 
 # Remove fake database import
 # from fake_database import Database  # Replace with your actual DB type
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 # Log to stderr only. In stdio mode stdout carries the MCP JSON-RPC stream, so
@@ -62,19 +62,8 @@ class Settings(BaseSettings):
     # Paths are resolved (symlinks included) and must stay inside this directory.
     csv_import_dir: str = Field(default='', alias='CSV_IMPORT_DIR')
 
-    class Config:
-        # Allows loading from a .env file if present
-        env_file = '.env'
-        extra = 'ignore' # Ignore extra fields from env
-
-# Create a named server
-# Note: The MCP instance creation is duplicated, consolidating to the one with lifespan
-# mcp = FastMCP("My App")
-
-# Specify dependencies for deployment and development
-# Dependencies can also be managed in pyproject.toml
-# mcp = FastMCP("My App", dependencies=["pandas", "numpy"])
-
+    # Allows loading from a .env file if present; ignore unrelated env vars
+    model_config = SettingsConfigDict(env_file='.env', extra='ignore')
 
 # Application context holding shared resources like the Typesense client
 @dataclass
@@ -86,12 +75,12 @@ class AppContext:
 
 # Manages the application lifecycle, initializing and cleaning up resources
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """
     Manage application lifecycle: initialize Typesense client on startup.
 
     Args:
-        server (FastMCP): The FastMCP server instance.
+        server (MCPServer): The MCPServer instance.
 
     Yields:
         AppContext: The application context containing the initialized Typesense client.
@@ -123,10 +112,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.info("Shutting down. Typesense client resources managed automatically.")
 
 
-# Pre-load settings so we can pass HTTP host/port into FastMCP for HTTP modes.
-# Settings() reads env vars; a missing TYPESENSE_API_KEY would raise here, which is
-# fine for `mcp.run(...)` but not for tooling like `mcp dev` that imports this
-# module without the env set — so fall back to defaults if instantiation fails.
 def _split_csv(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(',') if item.strip()]
 
@@ -174,20 +159,16 @@ def _build_transport_security(settings: Settings) -> TransportSecuritySettings:
     )
 
 
+# Pre-load settings for the HTTP transports. Settings() reads env vars; a missing
+# TYPESENSE_API_KEY would raise here, which is fine when running the server but
+# not for tooling like `mcp dev` that imports this module without the env set.
 try:
     _settings = Settings()
-    _server_kwargs = {
-        "host": _settings.mcp_host,
-        "port": _settings.mcp_port,
-        "stateless_http": _settings.mcp_stateless_http,
-        "transport_security": _build_transport_security(_settings),
-    }
 except Exception:
     _settings = None
-    _server_kwargs = {}
 
 # Initialize the MCP Server with the lifespan manager
-mcp = FastMCP("Typesense MCP Server", lifespan=app_lifespan, **_server_kwargs)
+mcp = MCPServer("Typesense MCP Server", lifespan=app_lifespan)
 
 
 # Example tool demonstrating access to the Typesense client
@@ -290,8 +271,11 @@ async def export_collection(ctx: Context, collection_name: str) -> list[dict] | 
         # Check if collection exists first to give a clearer error
         _ = client.collections[collection_name].retrieve() # Check existence synchronously
 
-        exported_lines = client.collections[collection_name].documents.export()
-        for line in exported_lines:
+        # export() returns a single JSON Lines string
+        exported = client.collections[collection_name].documents.export()
+        for line in exported.splitlines():
+            if not line.strip():
+                continue
             try:
                 documents.append(json.loads(line))
             except json.JSONDecodeError:
@@ -660,6 +644,30 @@ async def upsert_document(ctx: Context, collection_name: str, document: dict) ->
         logger.error(f"An unexpected error occurred while upserting document in '{collection_name}': {e}")
         return f"An unexpected error occurred: {e}"
 
+def _import_documents(client: typesense.Client, collection_name: str,
+                      documents: list[dict], action: str) -> list[dict]:
+    """
+    Import a batch and return one result dict per document.
+
+    `import_()` with a list already returns parsed dicts; a JSON Lines string is
+    handled too in case the client returns raw output.
+    """
+    response = client.collections[collection_name].documents.import_(documents, {'action': action})
+    if isinstance(response, (str, bytes)):
+        if isinstance(response, bytes):
+            response = response.decode('utf-8', errors='replace')
+        results = []
+        for line in response.splitlines():
+            if not line.strip():
+                continue
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning(f"Could not decode JSON line from import response: {line}")
+                results.append({'success': False, 'error': 'Failed to decode response line', 'raw_line': line})
+        return results
+    return [dict(r) for r in response]
+
 # Tool to index (create, upsert, update) multiple documents
 @mcp.tool()
 async def index_multiple_documents(
@@ -688,22 +696,9 @@ async def index_multiple_documents(
     if action not in ['create', 'upsert', 'update']:
         return "Error: action parameter must be one of 'create', 'upsert', 'update'."
 
-    results = []
     try:
         client: typesense.Client = ctx.request_context.lifespan_context.client
-        # NOTE: Assuming import_ is *sync* based on observed pattern
-        # Also, the response is JSONL strings, not directly awaitable objects
-        import_response_lines = client.collections[collection_name].documents.import_(documents, {'action': action})
-
-        # Response is JSON Lines (string per result), parse each line
-        # NOTE: Changed to normal 'for' loop
-        for line in import_response_lines:
-            try:
-                results.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.warning(f"Could not decode JSON line from import response: {line}")
-                results.append({'success': False, 'error': 'Failed to decode response line', 'raw_line': line})
-        return results
+        return _import_documents(client, collection_name, documents, action)
     except typesense.exceptions.ObjectNotFound:
         return f"Error: Collection '{collection_name}' not found."
     except typesense.exceptions.RequestMalformed as e:
@@ -809,6 +804,24 @@ async def import_documents_from_csv(
     errors = []
     import_results = []
 
+    def flush_batch(batch: list[dict]) -> None:
+        nonlocal total_successful, total_failed
+        logger.info(f"Importing batch of {len(batch)} documents...")
+        try:
+            results = _import_documents(client, collection_name, batch, action)
+        except Exception as batch_error:
+            logger.error(f"Error importing batch: {batch_error}")
+            total_failed += len(batch)  # Assume all in batch failed
+            errors.append(f"Failed to import batch: {batch_error}")
+            return
+        for result in results:
+            import_results.append(result)
+            if result.get('success', False):
+                total_successful += 1
+            else:
+                total_failed += 1
+                errors.append(result.get('error', 'Unknown error in batch result'))
+
     try:
         # Check if collection exists (synchronously)
         _ = client.collections[collection_name].retrieve()
@@ -861,56 +874,12 @@ async def import_documents_from_csv(
             batch.append(processed_row)
 
             if len(batch) >= batch_size:
-                logger.info(f"Importing batch of {len(batch)} documents...")
-                try:
-                    # NOTE: Assuming import_ is *sync* based on observed pattern
-                    # Also, the response is JSONL strings
-                    batch_results_lines = client.collections[collection_name].documents.import_(batch, {'action': action})
-                    # NOTE: Changed to normal 'for' loop
-                    for line in batch_results_lines:
-                        try:
-                            result = json.loads(line)
-                            import_results.append(result)
-                            if result.get('success', False):
-                                total_successful += 1
-                            else:
-                                total_failed += 1
-                                errors.append(result.get('error', 'Unknown error in batch result'))
-                        except json.JSONDecodeError:
-                            logger.warning(f"Could not decode JSON line from import response: {line}")
-                            total_failed += 1
-                            errors.append(f"Failed to decode response line: {line}")
-                except Exception as batch_error:
-                    logger.error(f"Error importing batch: {batch_error}")
-                    total_failed += len(batch) # Assume all in batch failed
-                    errors.append(f"Failed to import batch: {batch_error}")
-                finally:
-                    batch = [] # Clear batch
+                flush_batch(batch)
+                batch = []
 
         # Import any remaining documents in the last batch
         if batch:
-            logger.info(f"Importing final batch of {len(batch)} documents...")
-            try:
-                # NOTE: Assuming import_ is *sync* based on observed pattern
-                batch_results_lines = client.collections[collection_name].documents.import_(batch, {'action': action})
-                # NOTE: Changed to normal 'for' loop
-                for line in batch_results_lines:
-                     try:
-                        result = json.loads(line)
-                        import_results.append(result)
-                        if result.get('success', False):
-                            total_successful += 1
-                        else:
-                            total_failed += 1
-                            errors.append(result.get('error', 'Unknown error in batch result'))
-                     except json.JSONDecodeError:
-                        logger.warning(f"Could not decode JSON line from import response: {line}")
-                        total_failed += 1
-                        errors.append(f"Failed to decode response line: {line}")
-            except Exception as batch_error:
-                logger.error(f"Error importing final batch: {batch_error}")
-                total_failed += len(batch)
-                errors.append(f"Failed to import final batch: {batch_error}")
+            flush_batch(batch)
 
     except typesense.exceptions.ObjectNotFound:
         return {"success": False, "error": f"Collection '{collection_name}' not found."}
@@ -954,7 +923,7 @@ class BearerTokenMiddleware:
 
 
 def _run_http(transport: str, settings: Settings) -> None:
-    """Serve a FastMCP HTTP app with optional bearer auth and CORS."""
+    """Serve an MCPServer HTTP app with optional bearer auth and CORS."""
     import uvicorn
     from starlette.middleware.cors import CORSMiddleware
 
@@ -966,7 +935,15 @@ def _run_http(transport: str, settings: Settings) -> None:
             "auth is enforced elsewhere (e.g. a reverse proxy)."
         )
 
-    app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
+    security = _build_transport_security(settings)
+    if transport == "sse":
+        app = mcp.sse_app(transport_security=security, host=settings.mcp_host)
+    else:
+        app = mcp.streamable_http_app(
+            transport_security=security,
+            host=settings.mcp_host,
+            stateless_http=settings.mcp_stateless_http,
+        )
 
     # Middleware added last runs first: CORS must wrap auth so preflight
     # (OPTIONS) requests, which never carry credentials, are answered.
